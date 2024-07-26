@@ -23,7 +23,7 @@ with DAG(
         default_args=default_args,
         description="Transfering the data from the source to destination DB",
         #schedule_interval='@daily',
-        schedule_interval=timedelta(minutes=30),
+        schedule_interval=timedelta(hours=24),
         catchup=False
         ) as dag:
     
