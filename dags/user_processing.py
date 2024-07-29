@@ -61,12 +61,12 @@ with DAG('user_processing',# Dag name
     )
 
     extract_user = SimpleHttpOperator(
-        task_id='extract_user',
-        http_conn_id='user_api',
-        endpoint='api/',
-        method='GET',
-        response_filter=lambda response: json.loads(response.text),
-        log_response=True
+        task_id = 'extract_user',
+        http_conn_id = 'user_api',
+        endpoint = 'api/',
+        method = 'GET',
+        response_filter = lambda response: json.loads(response.text),
+        log_response = True
     )
 
     process_user = PythonOperator(
