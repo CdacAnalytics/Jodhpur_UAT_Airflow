@@ -7,61 +7,72 @@ from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.operators.generic_transfer import GenericTransfer
 from datetime import datetime, timedelta
-
-
+import pendulum
+from airflow.utils.email import send_email
 from email.mime.text import MIMEText
 import smtplib
 
+
+
+# setting the time as indian standard time. We have to set this if we want to schedule a pipeline 
+time_zone = pendulum.timezone("Asia/Kolkata")
+
 def send_alert(context):
-    msg = MIMEText("Task failed and retries exhausted. Manual intervention required.")
-    msg['Subject'] = 'Airflow Alert: Data Transfer Failure'
-    msg['From'] = 'gauravnagrale5@gmail.com'
-    msg['To'] = 'vharshalahari@cdac.in'
+    print('Task failed sending an Email')
+    task_instance = context.get('task_instance')
+    task_id = task_instance.task_id
+    dag_id = context.get('dag').dag_id
+    execution_date = context.get('execution_date')
+    
+    subject = f'Airflow Alert: Task Failure in {dag_id}'
+    body = f"""
+    Task ID: {task_id}
+    DAG ID: {dag_id}
+    Execution Date: {execution_date}
+    
+    Task failed and retries exhausted. Manual intervention required.
+    """
+    
+    # Using Airflow's send_email function for consistency and better integration
+    send_email(
+        to='v.harshalaharicdac@gmail.com',
+        subject=subject,
+        html_content=body
+    )
 
-    # Connect to Gmail's SMTP server
-    s = smtplib.SMTP('smtp.gmail.com', 587)
-    s.starttls()  # Upgrade the connection to a secure encrypted SSL/TLS connection
-    s.login('gauravnagrale5@gmail.com', 'Shibu@2675')  # Login to the SMTP server
-    s.sendmail('gauravnagrale5@gmail.com', ['vharshalahari@cdac.in'], msg.as_string())
-    s.quit()
-
-
-# if the DAG is failed for some reason this will ensure that the DAG attempts it onemore time or n no of times and we can also set after how many mins the step will be retried
+# Default arguments for the DAG
 default_args = {
-    'owner': 'Gaurav', # this name can be used to monitoring and notification
-    'retries': 2, # This defines no of times the Task should be repeated if the task is failed
-    'retry_delay': timedelta(minutes=5), # delay between the retry
+    'owner': 'Gaurav',
+    'start_date': datetime(2023, 11, 22, tzinfo=time_zone),
+    'retries': 1,
+    'retry_delay': timedelta(minutes=1),
     'on_failure_callback': send_alert
 }
 
+# Define the DAG
 with DAG(
-        dag_id="Data_transfer", # DGA name
-        start_date=datetime(2023, 11, 22),  # for this date the DGA will start running
-        default_args=default_args, 
-        description="Transfering the data from the source to destination DB",
-        #schedule_interval='@daily',
-        schedule_interval=timedelta(hours=24), # When this DAG intervals
-        catchup=False  # This means that the DAG will not run for any missed intervals between the start_date and the current date.
-        ) as dag:
-    
+        dag_id="Data_transfer",
+        default_args=default_args,
+        description="Transferring the data from the source to destination DB",
+        schedule_interval='0 0 * * *',  # Schedule interval set to every day at midnight
+        catchup=False
+    ) as dag:
+
     create_table = PostgresOperator(
-        task_id = 'create_table',
-        postgres_conn_id = 'postgres',
-        sql = ''' 
+        task_id='create_table',
+        postgres_conn_id='postgres',
+        sql='''
         CREATE TABLE IF NOT EXISTS OPD_count(
-            Date TIMESTAMP Not null ,
-            OPD_count int Not null,
+            Date TIMESTAMP NOT NULL,
+            OPD_count INT NOT NULL,
             date_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
+        );
         '''
     )
 
-    # Transfering the source data to the destination data: 
-    # GenericTransfer task to upload data into the source table
-    # first transfering the data to a staging area and then to the destination
     transfer_data = PostgresOperator(
         task_id='transfer_data',
-        postgres_conn_id='source_conn_id', # defines at the AIRFLOW UI 
+        postgres_conn_id='source_conn_id',
         sql='''
         COPY (SELECT trunc(gdt_entry_date) as Date,
                      count(hrgnum_puk) as OPD_count
@@ -75,10 +86,11 @@ with DAG(
 
     load_data = PostgresOperator(
         task_id='load_data',
-        postgres_conn_id='destination_conn_id',# defines at the AIRFLOW UI 
+        postgres_conn_id='destination_conn_id',
         sql='''
         COPY OPD_count (Date, OPD_count)
         FROM '/tmp/staging_data.csv' WITH CSV;
         '''
     )
+
     create_table >> transfer_data >> load_data
