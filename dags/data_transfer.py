@@ -23,19 +23,24 @@ def send_alert(context):
     task_id = task_instance.task_id
     dag_id = context.get('dag').dag_id
     execution_date = context.get('execution_date')
-    
+    start_date = task_instance.start_date
+    No_of_retries = default_args['retries']
+    retry_delay = default_args['retry_delay']
+
     subject = f'Airflow Alert: Task Failure in {dag_id}'
     body = f"""
-    Task ID: {task_id}
-    DAG ID: {dag_id}
-    Execution Date: {execution_date}
-    
-    Task failed and retries exhausted. Manual intervention required.
+    <br>Task ID: {task_id}</br>
+    <br>DAG ID: {dag_id}</br>
+    <br>Execution Date: {execution_date}</br>
+    <br>Start Date: {start_date}</br>
+    <br>Retries: {No_of_retries}</br>
+    <br>Delay_between_retry: {retry_delay}</br>
+    <br>Task failed and retries exhausted. Manual intervention required.</br>
     """
     
     # Using Airflow's send_email function for consistency and better integration
     send_email(
-        to='v.harshalaharicdac@gmail.com',
+        to='kaushal.jeena@gmail.com',
         subject=subject,
         html_content=body
     )
@@ -55,6 +60,7 @@ with DAG(
         default_args=default_args,
         description="Transferring the data from the source to destination DB",
         schedule_interval='0 0 * * *',  # Schedule interval set to every day at midnight
+        # 5 - Mins , 11-Hours ,* - any day of week ,*- any month,*-any day of week 
         catchup=False
     ) as dag:
 
