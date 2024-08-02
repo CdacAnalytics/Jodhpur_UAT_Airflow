@@ -23,7 +23,6 @@ def send_alert(context):
     task_id = task_instance.task_id
     dag_id = context.get('dag').dag_id
     execution_date = context.get('execution_date')
-    start_date = task_instance.start_date
     No_of_retries = default_args['retries']
     retry_delay = default_args['retry_delay']
 
@@ -32,7 +31,6 @@ def send_alert(context):
     <br>Task ID: {task_id}</br>
     <br>DAG ID: {dag_id}</br>
     <br>Execution Date: {execution_date}</br>
-    <br>Start Date: {start_date}</br>
     <br>Retries: {No_of_retries}</br>
     <br>Delay_between_retry: {retry_delay}</br>
     <br>Task failed and retries exhausted. Manual intervention required.</br>
@@ -40,7 +38,7 @@ def send_alert(context):
     
     # Using Airflow's send_email function for consistency and better integration
     send_email(
-        to='kaushal.jeena@gmail.com',
+        to='gauravnagraleofficial@gmail.com',
         subject=subject,
         html_content=body
     )
@@ -64,6 +62,7 @@ with DAG(
         catchup=False
     ) as dag:
 
+    # creating the table source table 
     create_table = PostgresOperator(
         task_id='create_table',
         postgres_conn_id='postgres',
@@ -75,7 +74,10 @@ with DAG(
         );
         '''
     )
-
+    # transferring the data into a staging area
+    # with clause specifies that the format for the output should be saved as CSV 
+    # and this data is stored in container running in docker
+    # the data will be lost once the container is stopped or removed
     transfer_data = PostgresOperator(
         task_id='transfer_data',
         postgres_conn_id='source_conn_id',
@@ -89,7 +91,7 @@ with DAG(
         TO '/tmp/staging_data.csv' WITH CSV;
         '''
     )
-
+    #Note: the temp folder is present inside the test-airflow-postgres-1 /bin/bash
     load_data = PostgresOperator(
         task_id='load_data',
         postgres_conn_id='destination_conn_id',
@@ -98,5 +100,4 @@ with DAG(
         FROM '/tmp/staging_data.csv' WITH CSV;
         '''
     )
-
     create_table >> transfer_data >> load_data
