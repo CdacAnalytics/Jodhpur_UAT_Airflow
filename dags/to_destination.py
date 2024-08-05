@@ -7,6 +7,8 @@ from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.operators.generic_transfer import GenericTransfer
 from airflow.operators.mysql_operator import MySqlOperator
+from airflow.providers.sqlite.operators.sqlite import SqliteOperator
+
 from datetime import datetime, timedelta
 import pendulum
 from airflow.utils.email import send_email
@@ -53,52 +55,27 @@ default_args = {
     'on_failure_callback': send_alert
 }
 
+
 # Define the DAG
 with DAG(
-        dag_id="Data_transfer",
+        dag_id="To_Destination",
         default_args=default_args,
         description="Transferring the data from the source to destination DB",
         schedule_interval='0 0 * * *',  # Schedule interval set to every day at midnight
-        # 5 - Mins , 11-Hours ,* - any day of week ,*- any month,*-any day of week 
         catchup=False
     ) as dag:
 
-    # creating the table source table 
-    create_table = PostgresOperator(
+    # Create table in MySQL
+    create_table = MySqlOperator(
         task_id='create_table',
-        postgres_conn_id='destination_conn_id',
+        mysql_conn_id='my_sql_destination_conns',
         sql='''
         CREATE TABLE IF NOT EXISTS OPD_count(
             Date TIMESTAMP NOT NULL,
             OPD_count INT NOT NULL,
             date_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-        '''
+        ''',
+        dag=dag,
     )
-    # transferring the data into a staging area
-    # with clause specifies that the format for the output should be saved as CSV 
-    # and this data is stored in container running in docker
-    # the data will be lost once the container is stopped or removed
-    transfer_data = PostgresOperator(
-        task_id='transfer_data',
-        postgres_conn_id='source_conn_id',
-        sql='''
-        COPY (SELECT trunc(gdt_entry_date) as Date,
-                     count(hrgnum_puk) as OPD_count
-              FROM hrgt_episode_dtl
-              WHERE gnum_isvalid = 1
-              AND gnum_hospital_code = 22914
-              GROUP BY trunc(gdt_entry_date))
-        TO '/tmp/staging_data.csv' WITH CSV;
-        '''
-    )
-    #Note: the temp folder is present inside the test-airflow-postgres-1 /bin/bash
-    load_data = PostgresOperator(
-        task_id='load_data',
-        postgres_conn_id='destination_conn_id',
-        sql='''
-        COPY OPD_count (Date, OPD_count)
-        FROM '/tmp/staging_data.csv' WITH CSV;
-        '''
-    )
-    create_table >> transfer_data >> load_data
+    create_table
