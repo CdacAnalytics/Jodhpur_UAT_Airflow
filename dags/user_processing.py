@@ -22,7 +22,7 @@ def _process_user(ti):
 
 
 def _store_user():
-    hook = PostgresHook(postgres_conn_id='postgres') # this allow the interaction with Postgres
+    hook = PostgresHook(postgres_conn_id='destination_conn_id') # this allow the interaction with Postgres
     hook.copy_expert(
         #Only this fields will be coppied and not the date and time
         sql="""
@@ -39,7 +39,7 @@ with DAG('user_processing',# Dag name
     
     create_table = PostgresOperator(
         task_id = 'create_table',
-        postgres_conn_id = 'postgres',
+        postgres_conn_id = 'User_postgres',
         sql = ''' 
         CREATE TABLE IF NOT EXISTS users(
             firstname TEXT NOT NULL,

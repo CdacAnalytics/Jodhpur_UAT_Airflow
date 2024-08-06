@@ -7,6 +7,9 @@ from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.operators.generic_transfer import GenericTransfer
 from airflow.operators.mysql_operator import MySqlOperator
+from airflow.operators.python_operator import PythonOperator
+import logging
+
 from datetime import datetime, timedelta
 import pendulum
 from airflow.utils.email import send_email
@@ -44,6 +47,27 @@ def send_alert(context):
         html_content=body
     )
 
+def compare_rows (ti, **kwargs):
+    source_row_count = ti.xcom_pull(task_ids='source_rowcnt')
+    destination_row_count = ti.xcom_pull(task_ids='destination_rowcnt')
+
+    logging.info('Processed source row count: %s', source_row_count)
+    logging.info('Processed destination row count: %s', destination_row_count)
+
+    if source_row_count and destination_row_count:
+        source_row_count = source_row_count[0].get('row_count', 0)
+        destination_row_count = destination_row_count[0].get('row_count', 0)
+        
+        logging.info('Processed source row count: %s', source_row_count)
+        logging.info('Processed destination row count: %s', destination_row_count)
+
+        if source_row_count != destination_row_count:
+            send_alert(kwargs)
+            raise ValueError("Row counts do not match between source and destination")
+    else:
+        raise ValueError("Failed to retrieve row counts from XCom")
+    
+
 # Default arguments for the DAG
 default_args = {
     'owner': 'Gaurav',
@@ -75,13 +99,28 @@ with DAG(
         );
         '''
     )
+
+    source_row_count = PostgresOperator(
+        task_id = 'source_rowcnt',
+        postgres_conn_id = 'postgres',
+        sql = '''
+            select count(hrgnum_puk) as source_row_count
+            from hrgt_episode_dtl
+            where gnum_isvalid = 1
+            and gnum_hospital_code = 22914
+            and TRUNC(gdt_entry_date) = TRUNC(SYSDATE);
+            ''',
+        do_xcom_push = True # this is how you push the query data 
+    )
+
     # transferring the data into a staging area
     # with clause specifies that the format for the output should be saved as CSV 
     # and this data is stored in container running in docker
     # the data will be lost once the container is stopped or removed
+
     transfer_data = PostgresOperator(
         task_id='transfer_data',
-        postgres_conn_id='source_conn_id',
+        postgres_conn_id='postgres',
         sql='''
         COPY (SELECT trunc(gdt_entry_date) as Date,
                      count(hrgnum_puk) as OPD_count
@@ -92,6 +131,7 @@ with DAG(
         TO '/tmp/staging_data.csv' WITH CSV;
         '''
     )
+
     #Note: the temp folder is present inside the test-airflow-postgres-1 /bin/bash
     load_data = PostgresOperator(
         task_id='load_data',
@@ -101,4 +141,22 @@ with DAG(
         FROM '/tmp/staging_data.csv' WITH CSV;
         '''
     )
-    create_table >> transfer_data >> load_data
+
+    destination_row_count = PostgresOperator(
+        task_id = 'destination_rowcnt',
+        postgres_conn_id = 'destination_conn_id',
+        sql = '''
+            select count(opd_count) as dest_row_count
+            from opd_count
+            where TRUNC(date_time) = TRUNC(SYSDATE);
+            ''',
+        do_xcom_push = True
+    )
+
+    compare_count = PythonOperator (
+        task_id = 'compare_row',
+        provide_context=True,
+        python_callable=compare_rows
+    )
+
+    create_table >> source_row_count >> transfer_data >> load_data >> destination_row_count >> compare_count
