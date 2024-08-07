@@ -11,6 +11,7 @@ from pandas import json_normalize
 def _process_user(ti):
     user = ti.xcom_pull(task_ids="extract_user")
     user = user['results'][0] # view the API for more info
+    print('user-data:- ',user)
     processed_user = json_normalize({
         'firstname': user['name']['first'],
         'lastname': user['name']['last'],

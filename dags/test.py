@@ -46,9 +46,15 @@ def send_alert(context):
     )
 
 
-def print_data(ti, **kwargs):
+def print_data(ti):
     source_row_count = ti.xcom_pull(task_ids='source_rowcnt')
+    #source_row_count = source_row_count['source_row_count'][0]
     logging.info('Pulled source row count: %s', source_row_count)
+    if source_row_count is not None:
+        source_row_count_value = source_row_count[0].get('source_row_count')
+        logging.info('Pulled source row count: %s', source_row_count_value)
+    else:
+        logging.warning('No data was pulled from XCom.')
 
 
 
@@ -90,4 +96,3 @@ with DAG(
     )
 
     source_row_count >> compare_count
-
