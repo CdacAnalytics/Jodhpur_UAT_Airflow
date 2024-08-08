@@ -1,5 +1,5 @@
 from airflow import DAG
-from datetime import datetime
+from datetime import datetime, timedelta
 from airflow.providers.postgres.operators.postgres import PostgresOperator
 from airflow.providers.http.sensors.http import HttpSensor
 from airflow.providers.http.operators.http import SimpleHttpOperator
@@ -7,16 +7,12 @@ from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.operators.generic_transfer import GenericTransfer
 from airflow.operators.mysql_operator import MySqlOperator
-from airflow.operators.python_operator import PythonOperator
-import logging
-
-from datetime import datetime, timedelta
-import pendulum
+from airflow.utils.trigger_rule import TriggerRule
 from airflow.utils.email import send_email
-from email.mime.text import MIMEText
-import smtplib
+import logging
+import pendulum
 
-# setting the time as indian standard time. We have to set this if we want to schedule a pipeline 
+# Setting the time as Indian Standard Time
 time_zone = pendulum.timezone("Asia/Kolkata")
 
 def send_alert(context):
@@ -45,18 +41,40 @@ def send_alert(context):
         html_content=body
     )
 
+def print_data():
+    sql_query1 = ''' 
+        select count(*) as dest_row_count
+        from air_dag_success
+        where TRUNC(execution_date) = TRUNC(SYSDATE);
+    '''
 
-def print_data(ti):
-    source_row_count = ti.xcom_pull(task_ids='source_rowcnt')
-    #source_row_count = source_row_count['source_row_count'][0]
-    logging.info('Pulled source row count: %s', source_row_count)
-    if source_row_count is not None:
-        source_row_count_value = source_row_count[0].get('source_row_count')
-        logging.info('Pulled source row count: %s', source_row_count_value)
+    sql_query2 = ''' 
+        select count(hrgnum_puk) as source_row_count
+        from hrgt_episode_dtl
+        where gnum_isvalid = 1
+        and gnum_hospital_code = 22914
+        --and TRUNC(gdt_entry_date) = TRUNC(SYSDATE);'''
+    
+    dest_hook_dest = PostgresHook(postgres_conn_id='destination_conn_id', schema='Airflow_destination')
+    sour_hook_dest = PostgresHook(postgres_conn_id='aiimsnew_conn', schema='aiimsnew')
+
+    dest_row_count = dest_hook_dest.get_records(sql_query1)
+    sour_row_count = sour_hook_dest.get_records(sql_query2)
+
+    logging.info(f"Query result: {dest_row_count}")
+    logging.info(f"Query result: {sour_row_count}")
+    return dest_row_count,sour_row_count
+
+def print_xcom_result(**kwargs):
+    ti = kwargs['ti']
+    result = ti.xcom_pull(task_ids='compare_row')
+    dest_row_count, sour_row_count = result
+    logging.info(f"XCom destination row count: {dest_row_count}")
+    logging.info(f"XCom source row count: {sour_row_count}")
+    if sour_row_count != dest_row_count:
+        send_alert(kwargs)
     else:
-        logging.warning('No data was pulled from XCom.')
-
-
+        logging.info('Row counts match')
 
 default_args = {
     'owner': 'Gaurav',
@@ -66,33 +84,25 @@ default_args = {
     'on_failure_callback': send_alert
 }
 
-# Define the DAG
 with DAG(
-        dag_id="test_DAG",
-        default_args=default_args,
-        description="Transferring the data from the source to destination DB",
-        schedule_interval='0 0 * * *',  # Schedule interval set to every day at midnight
-        # 5 - Mins , 11-Hours ,* - any day of week ,*- any month,*-any day of week 
-        catchup=False
-    ) as dag:
+    dag_id="test_DAG",
+    default_args=default_args,
+    description="Transferring the data from the source to destination DB",
+    schedule_interval='0 0 * * *',  # Schedule interval set to every day at midnight
+    catchup=False
+) as dag:
 
-    source_row_count = PostgresOperator(
-        task_id = 'source_rowcnt',
-        postgres_conn_id = 'postgres',
-        sql = '''
-            select count(hrgnum_puk) as source_row_count
-            from hrgt_episode_dtl
-            where gnum_isvalid = 1
-            and gnum_hospital_code = 22914
-            and TRUNC(gdt_entry_date) = TRUNC(SYSDATE);
-            ''',
-        do_xcom_push = True # this is how you push the query data 
-    )
-
-    compare_count = PythonOperator (
-        task_id = 'compare_row',
+    compare_count = PythonOperator(
+        task_id='compare_row',
         provide_context=True,
         python_callable=print_data
     )
 
-    source_row_count >> compare_count
+    log_xcom_result = PythonOperator(
+        task_id='log_xcom_result',
+        provide_context=True,
+        python_callable=print_xcom_result,
+        trigger_rule=TriggerRule.ALL_SUCCESS
+    )
+
+    compare_count >> log_xcom_result

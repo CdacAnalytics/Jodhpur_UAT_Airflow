@@ -59,24 +59,8 @@ def send_success_alert(context):
     task_id = task_instance.task_id
     dag_id = context.get('dag').dag_id
     execution_date = context.get('execution_date')
-    
     success_message = f'Task {task_id} in DAG {dag_id} succeeded on {execution_date}.'
-    
     log_success_to_db(task_id, dag_id, execution_date, success_message)
-    
-    subject = f'Airflow Success: Task Success in {dag_id}'
-    body = f"""
-    <br>Task ID: {task_id}</br>
-    <br>DAG ID: {dag_id}</br>
-    <br>Execution Date: {execution_date}</br>
-    <br>Success Message: {success_message}</br>
-    """
-    
-    send_email(
-        to='gauravnagraleofficial@gmail.com',
-        subject=subject,
-        html_content=body
-    )
 
 
 def log_success_to_db(task_id, dag_id, execution_date, success_message):
@@ -96,32 +80,42 @@ def log_failure_to_db(task_id, dag_id, execution_date, error_message):
     """
     hook.run(insert_sql, parameters=(task_id, dag_id, execution_date, error_message))
 
+def print_data(**kwargs):
+    sql_query1 = ''' 
+        select count(*) as dest_row_count
+        from opd_count
+        where TRUNC(date) = TRUNC(SYSDATE);
+    '''
 
-
-def compare_rows(ti, **kwargs):
-    #source_row_count = ti.xcom_pull(task_ids='source_rowcnt', key='return_value')
-    #destination_row_count = ti.xcom_pull(task_ids='destination_rowcnt', key='return_value')
-
-    source_row_count = 121
-    destination_row_count = 121
+    sql_query2 = ''' 
+        select count(hrgnum_puk) as source_row_count
+        from hrgt_episode_dtl
+        where gnum_isvalid = 1
+        and gnum_hospital_code = 22914
+        --and TRUNC(gdt_entry_date) = TRUNC(SYSDATE);
+    '''
     
-    logging.info('Retrieved source row count from XCom: %s', source_row_count)
-    logging.info('Retrieved destination row count from XCom: %s', destination_row_count)
+    dest_hook_dest = PostgresHook(postgres_conn_id='destination_conn_id', schema='Airflow_destination')
+    sour_hook_dest = PostgresHook(postgres_conn_id='aiimsnew_conn', schema='aiimsnew')
 
-    if source_row_count and destination_row_count:
-        #source_row_count = source_row_count[0].get('source_row_count', 0)
-        #destination_row_count = destination_row_count[0].get('dest_row_count', 0)
-        
-        logging.info('Processed source row count: %s', source_row_count)
-        logging.info('Processed destination row count: %s', destination_row_count)
+    dest_row_count = dest_hook_dest.get_records(sql_query1)[0]
+    sour_row_count = sour_hook_dest.get_records(sql_query2)[0]
 
-        if source_row_count != destination_row_count:
-            send_alert(kwargs)
-            raise ValueError("Row counts do not match between source and destination")
-        else:
-            logging.info('Row counts match')
+    logging.info(f"Query result: {dest_row_count}")
+    logging.info(f"Query result: {sour_row_count}")
+
+    return dest_row_count,sour_row_count
+
+def print_xcom_result(**kwargs):
+    ti = kwargs['ti']
+    result = ti.xcom_pull(task_ids='compare_row')
+    dest_row_count, sour_row_count = result
+    logging.info(f"XCom destination row count: {dest_row_count}")
+    logging.info(f"XCom source row count: {sour_row_count}")
+    if sour_row_count != dest_row_count:
+        send_alert(kwargs)
     else:
-        raise ValueError("Failed to retrieve row counts from XCom")
+        logging.info('Row counts match')
     
 
 # Default arguments for the DAG
@@ -158,21 +152,6 @@ with DAG(
         dag = dag
     )
 
-    source_row_count = PostgresOperator(
-        task_id = 'source_rowcnt',
-        postgres_conn_id = 'postgres',
-        sql = '''
-            select count(hrgnum_puk) as source_row_count
-            from hrgt_episode_dtl
-            where gnum_isvalid = 1
-            and gnum_hospital_code = 22914
-            and TRUNC(gdt_entry_date) = TRUNC(SYSDATE);
-            ''',
-        do_xcom_push = True, # this is how you push the query data
-        trigger_rule=TriggerRule.ALL_SUCCESS,
-        dag = dag
-    )
-
     # transferring the data into a staging area
     # with clause specifies that the format for the output should be saved as CSV 
     # and this data is stored in container running in docker
@@ -182,12 +161,12 @@ with DAG(
         task_id='transfer_data',
         postgres_conn_id='postgres',
         sql='''
-        COPY (SELECT trunc(gdt_entry_date) as Date,
-                     count(hrgnum_puk) as OPD_count
-              FROM hrgt_episode_dtl
-              WHERE gnum_isvalid = 1
-              AND gnum_hospital_code = 22914
-              GROUP BY trunc(gdt_entry_date))
+            COPY (SELECT trunc(gdt_entry_date) as Date,
+                count(hrgnum_puk) as OPD_count
+                FROM hrgt_episode_dtl
+                WHERE gnum_isvalid = 1
+                AND gnum_hospital_code = 22914
+                GROUP BY trunc(gdt_entry_date))
         TO '/tmp/staging_data.csv' WITH CSV;
         ''',
         dag = dag
@@ -204,24 +183,18 @@ with DAG(
         dag = dag
     )
 
-    destination_row_count = PostgresOperator(
-        task_id = 'destination_rowcnt',
-        postgres_conn_id = 'destination_conn_id',
-        sql = '''
-            select count(*) as dest_row_count
-            from opd_count
-            where TRUNC(date_time) = TRUNC(SYSDATE);
-            ''',
-        do_xcom_push = True,
-        trigger_rule=TriggerRule.ALL_SUCCESS,
-        dag = dag
-    )
 
-    compare_count = PythonOperator (
-        task_id = 'compare_row',
+    compare_count = PythonOperator(
+        task_id='compare_row',
         provide_context=True,
-        python_callable=compare_rows,
-        dag = dag
+        python_callable=print_data
     )
 
-    create_table >> source_row_count >> transfer_data >> load_data >> destination_row_count >> compare_count
+    log_xcom_result = PythonOperator(
+        task_id='log_xcom_result',
+        provide_context=True,
+        python_callable=print_xcom_result,
+        trigger_rule=TriggerRule.ALL_SUCCESS
+    )
+
+    create_table >> transfer_data >> load_data >> compare_count >> log_xcom_result
