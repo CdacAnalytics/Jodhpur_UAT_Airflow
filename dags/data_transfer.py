@@ -28,7 +28,7 @@ def send_alert(context):
     task_instance = context.get('task_instance')
     task_id = task_instance.task_id
     dag_id = context.get('dag').dag_id
-    execution_date = context.get('execution_date')
+    execution_date = str(context.get('execution_date'))
     exception = context.get('exception')
     No_of_retries = default_args['retries']
     retry_delay = default_args['retry_delay']
@@ -51,7 +51,7 @@ def send_alert(context):
         html_content=body
     )
 
-    log_failure_to_db(task_id, dag_id, execution_date, error_message)
+    log_failure_to_db(task_id, dag_id, execution_date, error_message,No_of_retries)
 
 def send_success_alert(context):
     print('Task succeeded sending a notification')
@@ -72,13 +72,13 @@ def log_success_to_db(task_id, dag_id, execution_date, success_message):
     hook.run(insert_sql, parameters=(task_id, dag_id, execution_date, success_message))
 
 
-def log_failure_to_db(task_id, dag_id, execution_date, error_message):
+def log_failure_to_db(task_id, dag_id, execution_date, error_message,No_of_retries):
     hook = PostgresHook(postgres_conn_id='destination_conn_id')
     insert_sql = """
-    INSERT INTO AIR_DAG_fail (task_id, dag_id, execution_date, error_message)
-    VALUES (%s, %s, %s, %s);
+    INSERT INTO air_dag_fail (task_id, dag_id, execution_date, error_message,retry_count)
+    VALUES (%s, %s, %s, %s,%s);
     """
-    hook.run(insert_sql, parameters=(task_id, dag_id, execution_date, error_message))
+    hook.run(insert_sql, parameters=(task_id, dag_id, execution_date, error_message,No_of_retries))
 
 def print_data(**kwargs):
     sql_query1 = ''' 
@@ -104,18 +104,27 @@ def print_data(**kwargs):
     logging.info(f"Query result: {dest_row_count}")
     logging.info(f"Query result: {sour_row_count}")
 
-    return dest_row_count,sour_row_count
+    
+    # Get execution date from kwargs and convert it to the desired time zone
+    execution_date = kwargs['execution_date']
+    execution_date_kolkata = execution_date.astimezone(time_zone)
+    
+    # Convert to string in ISO format
+    execution_date_str = execution_date_kolkata.isoformat()
 
-def print_xcom_result(**kwargs):
-    ti = kwargs['ti']
-    result = ti.xcom_pull(task_ids='compare_row')
-    dest_row_count, sour_row_count = result
-    logging.info(f"XCom destination row count: {dest_row_count}")
-    logging.info(f"XCom source row count: {sour_row_count}")
-    if sour_row_count != dest_row_count:
+    # Insert row counts into air_row_count table
+    insert_sql = '''
+    INSERT INTO air_row_count (execution_date,Destination_row, Source_row)
+    VALUES (%s, %s, %s);
+    '''
+    dest_hook_dest.run(insert_sql, parameters=(execution_date_str, sour_row_count, dest_row_count))
+
+    if sour_row_count!=dest_row_count:
         send_alert(kwargs)
     else:
-        logging.info('Row counts match')
+        logging.info('The Rows are same')
+
+    return dest_row_count,sour_row_count
     
 
 # Default arguments for the DAG
@@ -166,7 +175,8 @@ with DAG(
                 FROM hrgt_episode_dtl
                 WHERE gnum_isvalid = 1
                 AND gnum_hospital_code = 22914
-                GROUP BY trunc(gdt_entry_date))
+                --and trunc(gdt_entry_date) = trunc(sysdate)
+                GROUP BY  trunc(gdt_entry_date))
         TO '/tmp/staging_data.csv' WITH CSV;
         ''',
         dag = dag
@@ -190,11 +200,4 @@ with DAG(
         python_callable=print_data
     )
 
-    log_xcom_result = PythonOperator(
-        task_id='log_xcom_result',
-        provide_context=True,
-        python_callable=print_xcom_result,
-        trigger_rule=TriggerRule.ALL_SUCCESS
-    )
-
-    create_table >> transfer_data >> load_data >> compare_count >> log_xcom_result
+    create_table >> transfer_data >> load_data >> compare_count 
