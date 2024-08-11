@@ -11,7 +11,7 @@ from airflow.operators.python_operator import PythonOperator
 from airflow.utils.trigger_rule import TriggerRule
 
 import logging
-
+import csv
 from datetime import datetime, timedelta
 import pendulum
 from airflow.utils.email import send_email
@@ -91,12 +91,12 @@ def print_data(**kwargs):
         select count(hrgnum_puk) as source_row_count
         from hrgt_episode_dtl
         where gnum_isvalid = 1
-        and gnum_hospital_code = 22914
-        --and TRUNC(gdt_entry_date) = TRUNC(SYSDATE);
+        and gnum_hospital_code = 98926
+        and TRUNC(gdt_entry_date) = TRUNC(SYSDATE);
     '''
     
     dest_hook_dest = PostgresHook(postgres_conn_id='destination_conn_id', schema='Airflow_destination')
-    sour_hook_dest = PostgresHook(postgres_conn_id='aiimsnew_conn', schema='aiimsnew')
+    sour_hook_dest = PostgresHook(postgres_conn_id='postgres', schema='aiims_jodhpur')
 
     dest_row_count = dest_hook_dest.get_records(sql_query1)[0]
     sour_row_count = sour_hook_dest.get_records(sql_query2)[0]
@@ -125,6 +125,31 @@ def print_data(**kwargs):
         logging.info('The Rows are same')
 
     return dest_row_count,sour_row_count
+
+
+# transferring the data into a staging area
+    # with clause specifies that the format for the output should be saved as CSV 
+    # and this data is stored in container running in docker
+    # the data will be lost once the container is stopped or removed
+def export_data_to_csv():
+    pg_hook = PostgresHook(postgres_conn_id='postgres')
+    conn = pg_hook.get_conn()
+    cursor = conn.cursor()
+    query = """
+        SELECT trunc(gdt_entry_date) as Date,
+               count(hrgnum_puk) as OPD_count
+        FROM hrgt_episode_dtl
+        WHERE gnum_isvalid = 1
+        AND gnum_hospital_code = 98926
+        and trunc(gdt_entry_date) = trunc(sysdate)
+        GROUP BY trunc(gdt_entry_date);
+    """
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    with open('/tmp/staging_data.csv', 'w') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Date', 'OPD_count'])
+        writer.writerows(rows)    
     
 
 # Default arguments for the DAG
@@ -161,26 +186,14 @@ with DAG(
         dag = dag
     )
 
-    # transferring the data into a staging area
-    # with clause specifies that the format for the output should be saved as CSV 
-    # and this data is stored in container running in docker
-    # the data will be lost once the container is stopped or removed
+    
 
-    transfer_data = PostgresOperator(
-        task_id='transfer_data',
-        postgres_conn_id='postgres',
-        sql='''
-            COPY (SELECT trunc(gdt_entry_date) as Date,
-                count(hrgnum_puk) as OPD_count
-                FROM hrgt_episode_dtl
-                WHERE gnum_isvalid = 1
-                AND gnum_hospital_code = 22914
-                --and trunc(gdt_entry_date) = trunc(sysdate)
-                GROUP BY  trunc(gdt_entry_date))
-        TO '/tmp/staging_data.csv' WITH CSV;
-        ''',
-        dag = dag
+    export_task = PythonOperator(
+    task_id='export_data_to_csv',
+    python_callable=export_data_to_csv,
+    dag=dag
     )
+
 
     #Note: the temp folder is present inside the test-airflow-postgres-1 /bin/bash
     load_data = PostgresOperator(
@@ -200,4 +213,4 @@ with DAG(
         python_callable=print_data
     )
 
-    create_table >> transfer_data >> load_data >> compare_count 
+    create_table >> export_task >> load_data >> compare_count 
